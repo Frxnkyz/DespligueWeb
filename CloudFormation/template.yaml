@@ -1,0 +1,39 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Plantilla para crear un Grupo de Seguridad y una instancia EC2 que permite trafico SSH y HTTP
+
+Resources:
+  # Grupo de Seguridad
+  SSHyHTTPGrupoSeguridad:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permite acceso SSH y HTTP desde cualquier direccion IP
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Instancia EC2
+  InstanciaEC2Plantilla:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.small
+      KeyName: vockey
+      SecurityGroupIds:
+        - !Ref SSHyHTTPGrupoSeguridad # Vincula el grupo de seguridad creado
+      ImageId: ami-0a313d6098716f372 #  Ubuntu 20.04 LTS
+      Tags:
+        - Key: Name
+          Value: TomcatServer
+Outputs:
+  SecurityGroupId:
+    Description: ID del Grupo de Seguridad creado
+    Value: !Ref SSHyHTTPGrupoSeguridad
+
+  InstanceId:
+    Description: ID de la instancia EC2 creada
+    Value: !Ref InstanciaEC2Plantilla
