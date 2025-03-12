@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Backend server con CodeDeploy y Tomcat
+
+Parameters:
+  InstanceType:
+    Description: Tipo de instancia EC2
+    Type: String
+    Default: t2.large
+    AllowedValues:
+      - t2.large
+      - t2.medium
+      - t2.small
+      - t2.micro
+      - t2.nano
+
+  InstanceImage:
+    Description: AMI de la instancia EC2
+    Type: String
+    Default: "ami-09e67e426f25ce0d7" 
+
+Resources:
+  SshSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group para acceso SSH"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+
+  TomcatSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security group para acceso a Tomcat (puerto 8080)"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  Backend:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      ImageId: !Ref InstanceImage
+      InstanceType: !Ref InstanceType 
+      KeyName: "vockey"
+      SecurityGroupIds: 
+        - !Ref SshSecurityGroup
+        - !Ref TomcatSecurityGroup
+      UserData: 
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          exec > /tmp/userdata.log 2>&1
+          # Actualización e instalación de utilidades
+          apt update -y
+          apt upgrade -y
+          apt install python3-pip -y
+          pip3 install https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz
+          ln -s /usr/local/init/ubuntu/cfn-hup /etc/init.d/cfn-hup
+
+          # ------------------> SCRIPT BACKEND <------------------
+          # Crear usuario tomcat
+          useradd -m -d /opt/tomcat -U -s /bin/false tomcat
+
+          # Instalar OpenJDK
+          apt install openjdk-21-jdk -y
+
+          # Descargar e instalar Tomcat
+          cd /tmp
+          wget https://dlcdn.apache.org/tomcat/tomcat-11/v11.0.2/bin/apache-tomcat-11.0.2.tar.gz
+          mkdir -p /opt/tomcat
+          tar xzvf apache-tomcat-11.0.2.tar.gz -C /opt/tomcat --strip-components=1
+          chown -R tomcat:tomcat /opt/tomcat
+          chmod -R u+x /opt/tomcat/bin
+
+          # Configurar usuarios en tomcat-users.xml
+          sed -i '/<\/tomcat-users>/i \
+          <role rolename="manager-gui" />\n\
+          <user username="manager" password="manager_password" roles="manager-gui" />\n\
+          <role rolename="admin-gui" />\n\
+          <user username="admin" password="admin_password" roles="manager-gui,admin-gui" />' /opt/tomcat/conf/tomcat-users.xml
+
+          # Comentar restricciones en Manager y Host Manager
+          sed -i '/<Valve /,/\/>/ s|<Valve|<!--<Valve|; /<Valve /,/\/>/ s|/>|/>-->|' /opt/tomcat/webapps/manager/META-INF/context.xml
+          sed -i '/<Valve /,/\/>/ s|<Valve|<!--<Valve|; /<Valve /,/\/>/ s|/>|/>-->|' /opt/tomcat/webapps/host-manager/META-INF/context.xml
+
+          # Crear archivo de servicio systemd para Tomcat
+          echo '[Unit]
+          Description=Tomcat
+          After=network.target
+
+          [Service]
+          Type=forking
+
+          User=tomcat
+          Group=tomcat
+
+          Environment="JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64"
+          Environment="JAVA_OPTS=-Djava.security.egd=file:///dev/urandom"
+          Environment="CATALINA_BASE=/opt/tomcat"
+          Environment="CATALINA_HOME=/opt/tomcat"
+          Environment="CATALINA_PID=/opt/tomcat/temp/tomcat.pid"
+          Environment="CATALINA_OPTS=-Xms512M -Xmx1024M -server -XX:+UseParallelGC"
+
+          ExecStart=/opt/tomcat/bin/startup.sh
+          ExecStop=/opt/tomcat/bin/shutdown.sh
+
+          RestartSec=10
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target' | sudo tee /etc/systemd/system/tomcat.service
+          
+          # Recargar systemd y habilitar Tomcat
+          systemctl daemon-reload
+          systemctl enable tomcat
+          systemctl start tomcat
+
+          # ------------------> DESPLIEGUE DE LA APLICACIÓN CON CODEDEPLOY <------------------
+          # La aplicación se desplegará mediante CodeDeploy.
+          # El paquete de despliegue (que incluye el archivo appspec.yml) debe contener el artefacto
+          # (por ejemplo, studentify.war) y las instrucciones para copiarlo a /opt/tomcat/webapps/.
+
+          # ------------------> INSTALACIÓN DEL CODEDEPLOY AGENT <------------------
+          apt install ruby wget -y
+          cd /home/ubuntu
+          wget https://aws-codedeploy-us-east-1.s3.amazonaws.com/latest/install -O codedeploy_install
+          chmod +x codedeploy_install
+          ./codedeploy_install auto
+          
+          # Señalización para CloudFormation (Backend)
+          /usr/local/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource Backend --region ${AWS::Region}
+
+Outputs:
+  AppURL:
+    Description: URL de la aplicación Backend
+    Value: !Sub "http://${Backend.PublicDnsName}:8080"
